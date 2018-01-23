@@ -5,11 +5,30 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Executors {
+	   /**
+	    * 创建一个可根据需要创建新线程的线程池，但是在以前构造的线程可用时将重用它们。
+	    * 对于执行很多短期异步任务的程序而言，这些线程池通常可提高程序性能。调用 execute 将重用以前构造的线程（如果线程可用）。
+	    * 如果现有线程没有可用的，则创建一个新线程并添加到池中。终止并从缓存中移除那些已有 60 秒钟未被使用的线程。
+	    * 因此，长时间保持空闲的线程池不会使用任何资源。
+	    * 注意，可以使用 ThreadPoolExecutor 构造方法创建具有类似属性但细节不同（例如超时参数）的线程池。 
+	    * @return
+	    */
        public static  ExecutorService newCachedThreadPool(){
     	   return new ThreadPoolExecutor(0,Integer.MAX_VALUE,60L,TimeUnit.SECONDS, new SynchronousQueue<Runnable>());
        }
-   
-       
+       /**
+        * 创建一个可根据需要创建新线程的线程池，但是在以前构造的线程可用时将重用它们，并在需要时使用提供的 ThreadFactory 创建新线程。 
+        * @param factory
+        * @return
+        */
+       public static ExecutorService newCachedThreadPool(ThreadFactory factory){
+		return new ThreadPoolExecutor(0,Integer.MAX_VALUE,60L,TimeUnit.SECONDS,new SynchronousQueue<Runnable>(),factory);
+    	   
+       }
+       public static ExecutorService newFixedThreadPool(int nThreads) {
+           return new ThreadPoolExecutor(nThreads, nThreads,  0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>());
+       }
+
        /**
         * 返回一个默认的线程工厂类，该类通过同一个ThreadGroup group来创建新线程
         * 如果System.getSecurityManager()返回的SecurityManager不为空，则使用该SecurityManager获取ThreadGroup

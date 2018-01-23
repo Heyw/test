@@ -42,9 +42,9 @@ public class FutureTask<V>  implements RunnableFuture<V> {
 	/**从get()方法返回的结果或者抛出的异常*/
 	private Object outcome;
 	/**运行callable的线程*/
-	private AtomicReference<Thread>  runner;
+	private AtomicReference<Thread>  runner=new AtomicReference<>();//必须初始化
 	/**等待线程的Treiber栈*/
-	private AtomicReference<WaitNode> waiters;
+	private AtomicReference<WaitNode> waiters=new AtomicReference<>();
 	
 	
 	/**
@@ -106,7 +106,7 @@ public class FutureTask<V>  implements RunnableFuture<V> {
 	public V get() throws InterruptedException, ExecutionException {
 		 int s=state.get();
 		 if(s<COMPLETING){
-			 awaitDone(false, 0L);
+			 s=awaitDone(false, 0L);//获取最新的state
 		 }
 		 return (V)report(s);
 	}
@@ -310,7 +310,7 @@ public class FutureTask<V>  implements RunnableFuture<V> {
 	 */
 	private void removeWaiter(WaitNode node){
 		if(node!=null){
-			node.thread=null;//将需要移除的节点的Thread属性设为null
+			node.thread=null;//将需要移除的节点的Thread属性设为null,所有被删除的节点的Thread属性都是null
 			retry:
 				for(;;){//如果出现竞态那么重现循环remove，此时将根据waiters属性初始化循环条件，这也是外循环的作用
 					for(WaitNode pred=null,q=waiters.get(),s;q!=null;q=s){

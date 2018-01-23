@@ -3,7 +3,6 @@ package threadpoolproject;
 import java.util.AbstractQueue;
 import java.util.Collection;
 import java.util.Iterator;
-import java.util.NoSuchElementException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
@@ -44,7 +43,7 @@ public class LinkedBlockingQueue<E>extends AbstractQueue<E> implements BlockingQ
 	 */
 	static class Node<E>{
 		E item;
-		Node next;
+		Node<E> next;
 		Node(E e){
 			this.item=e;
 		} 
@@ -143,7 +142,6 @@ public class LinkedBlockingQueue<E>extends AbstractQueue<E> implements BlockingQ
 	 * 然后将head指向下一个节点
 	 * @return
 	 */
-	@SuppressWarnings("unchecked")
 	private E dequeue(){
 //		Node<E> p=head.next;
 //		Node<E> next=p.next;
@@ -166,8 +164,7 @@ public class LinkedBlockingQueue<E>extends AbstractQueue<E> implements BlockingQ
 	 * @param pred
 	 * @param q
 	 */
-	@SuppressWarnings("unchecked")
-	private void unlink(Node pred,Node p){
+	private void unlink(Node<E> pred,Node<E> p){
 		//调用该方法必须在is FullyLock()情况下
 		//p.next不会被改变，允许遍历p的iterators维持弱一致性
 		//将pred的next指向p.next，这样就将p节点孤立了
@@ -184,8 +181,7 @@ public class LinkedBlockingQueue<E>extends AbstractQueue<E> implements BlockingQ
 	 * 从此队列移除指定元素的单个实例（如果存在）。更确切地讲，如果此队列包含一个或多个满足 o.equals(e) 的元素 e，
 	 *  则移除一个这样的元素。如果此队列包含指定元素，则返回 true（或者此队列由于调用而发生更改，则返回 true）。 
 	 */
-   @SuppressWarnings("unchecked")
-public boolean remove(Object o){
+   public boolean remove(Object o){
 	   if(o==null) return false;
 	   fullyLock();
 	   try{
@@ -268,7 +264,6 @@ public boolean remove(Object o){
 	 * 获取队列头部元素，但不移除
 	 * @return
 	 */
-	@SuppressWarnings("unchecked")
 	public E peek() {
         if(count.get()==0) return null;
         E x;
@@ -356,6 +351,19 @@ public boolean remove(Object o){
 		return true;
 	}
 
+	 public boolean contains(Object o){
+		 if(o==null) return false;
+		 fullyLock();
+		 try{
+			 for(Node<E>p=head.next;p!=null;p=p.next){
+				 if(o.equals(p.item))
+					 return true;
+			 }
+			 return false;
+		 }finally{
+			 unfullyLock();
+		 }
+	 }
 	/**
 	 * 
 	 */
@@ -420,21 +428,52 @@ public boolean remove(Object o){
 
 	@Override
 	public int drainTo(Collection<? super E> c) {
-		// TODO Auto-generated method stub
-		return 0;
+		return drainTo(c,count.get());
 	}
 
-	@Override
-	public int drainTo(Collection<? super E> c, int maxnum) {
-		// TODO Auto-generated method stub
-		return 0;
+	/**最多从此队列中移除给定数量的可用元素，并将这些元素添加到给定 collection 中。
+	 * 在试图向 collection c 中添加元素没有成功时，可能导致在抛出相关异常时，元素会同时在两个 collection 中出现，
+	 * 或者在其中一个 collection 中出现，也可能在两个 collection 中都不出现。如果试图将一个队列放入自身队列中，则会导致 IllegalArgumentException 异常。
+	 * 此外，如果正在进行此操作时修改指定的 collection，则此操作行为是不确定的。 
+	 */
+		public int drainTo(Collection<? super E> c, int maxnum) {
+		if(c==null) throw new NullPointerException();//c为空，抛出NullPointerException
+		if(c==this) throw new IllegalArgumentException();
+		final ReentrantLock takeLock=this.takeLock;
+		AtomicInteger count=this.count;
+		boolean signalNotEmpty=false;
+        takeLock.lock();
+        try{
+        	int n=Math.min(maxnum, count.get());//获取较小值作为添加元素的数目
+        	Node<E>h=head;
+        	int i=0;
+        	try{//此处利用try--finally为了处理c.add()其他类型元素时抛出的异常，如果不处理可能导致head节点为空
+        		while(i<n){
+        			Node<E>p=h.next;//获取下一个节点
+        			c.add(p.item);//添加元素
+        			p.item=null;//help gc
+        			h.next=h;//删除h所指向节点
+        			h=p;//将h指向下一个节点
+        			i++;
+        		}
+        		return n;
+        	}finally{
+        		if(i>0){
+        			head=h;//将h节点指向头结点，h.item必为null
+        			signalNotEmpty=(count.getAndAdd(-i))==capacity;//如果count减去i之前为capacity，那么队列中仍然有数，就调用signalNotEmpty
+        		}
+        	}
+        }finally{
+        	takeLock.unlock();
+        	if(signalNotEmpty)
+        		signalNotEmpty();
+        }
 	}
 	/**
 	 * 返回按适当顺序包含此队列中所有元素的数组。  由于此队列不维护对返回数组的任何引用，因而它是“安全的”。
 	 * （换句话说，此方法必须分配一个新数组）。因此，调用者可以随意修改返回的数组。 
 	 * 此方法充当基于数组的 API 与基于 collection 的 API 之间的桥梁。
 	 */
-	@SuppressWarnings("unchecked")
 	public Object[] toArray(){
 		int size=count.get();
 	    fullyLock();
@@ -510,24 +549,29 @@ public boolean remove(Object o){
          * @param node
          * @return
          */
-		@SuppressWarnings("unchecked")
 		private Node<E> nextNode(Node<E>node){
 			for(;;){
-				Node<E> s=node.next;
-				if(s==node)return head.next;
-				if(s==null|| s.item!=null)return s;
+				Node<E>s=node.next;
+				if(s==node)
+					return head.next;//如果node已经离开队列，那么返回head.next，head.next保存第一个元素
+				if(s==null || s.item!=null){//s==null 说明已经没有live successor，s.item！=null说明这已经是live successor，这两种情况都是可以返回的
+					return s;
+				}
 				node=s;
 			}
 		}
-
+       /**
+        * 返回当前值时，需要为current寻找下一个节点，这样current始终可以交接node.item
+        */
 		public E next() {
 			fullyLock();
 			try{
+				if(current==null) throw new IllegalStateException();//如果current为null，则抛出非法状态异常，因为hasNext通过才能next
 				E x=currentItem;
-			    lastNode=current;
-			    current=nextNode(current);
-			    currentItem=current==null?null:current.item;
-			    return x;
+				lastNode=current;
+				current=nextNode(current);
+				currentItem=current==null? null:current.item;
+				return x;
 			}finally{
 				unfullyLock();
 			}
@@ -536,18 +580,17 @@ public boolean remove(Object o){
 		/**
 		 * 从head开始遍历找到lastNode的pred，然后unlink它们
 		 */
-		@SuppressWarnings("unchecked")
 		public void remove() {
-		   if(lastNode==null) throw new IllegalStateException();
-		   fullyLock();
-		   try{
+			if(lastNode==null) throw new IllegalStateException();//非法状态异常 IllegalStateException
            Node<E> rmvNode=lastNode;
-           lastNode=null;//lastNode代表当前要删除的节点，所以要设置为null，为了方便gc
-           for(Node<E>pred=head,p=pred.next;p!=null;pred=p,p=p.next){
+           fullyLock();
+           try{
+        	   lastNode=null;//help gc，在清理完某个节点时，一定要判断某些引用是否还指向它，那么就要设置为null
+        	   for(Node<E>pred=head,p=head.next;p!=null;pred=p,p=p.next){
         		   if(p==rmvNode){
         			   unlink(pred, p);
         			   break;
-        		   }
+        			   }
         	   }
            }finally{
         	   unfullyLock();

@@ -34,8 +34,8 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 	 * 该类是对被称为"非阻塞对象的同步条件"的“dual stack and dual queue”算法一种扩展实现。该类提供了两种竞争机制：FIFO(先进先出)模式和FILO(先进后出)模式；
 	 * 这两种模式表现性能差不多，但是在一般应用中，FIFO模式可以支持更大的吞吐量,FILO可以更大程度上保持线程本地化(thread locality).
 	 * dual queue 或者dual stack 在任意时刻只有三种情况:(1)持有data:put()方法的元素，(2)持有request:take()方法获取元素，(3)为null
-	 * (1)对fullfil(比如:对持有data的队列request一个对象，反之亦然)的调用将会出队（dequeue）一个互补node;该队列最令人感兴趣的特征是：
-	 * 任何操作都可以通过判断当前的队列所处的mode来执行，无需利用锁；
+	 * (1)对fullfill(匹配操作)(比如:对持有data的队列request一个对象，反之亦然)的调用将会让一个互补node退出该队列（dequeue）;该队列最令人感兴趣的特征是：
+	 * 任何操作都可以通过判断当前的队列处于何种mode，无需利用锁来执行；
 	 * (2)queue和stack的数据结构共享了比较类似的观念，但几乎实质上的细节。就简单性而言，它们保持不同以便以后能够得到独立的演化。
 	 * (3)阻塞主要是通过LockSupport的方法park()/unpark()来完成的，只是对于那些似乎将变成下一个将要fulfilled的node的node首先会自旋(spin)一段时间(只要在多处理器的情况下);
 	 * 在synchronouse queue非常繁忙的情况下，自旋能够显著提升吞吐量，同时synchronouse queue如果不繁忙，那么自旋将会足够小以至不会引起注意.
@@ -68,13 +68,16 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 	
 	/**dual stack*/
 	static final class TransferStack extends Transferer{
-        /**node代表一个unfulfilled的消费者*/
+        /**node代表一个unfulfilled的消费者，相当于读取数据*/
 		static final int REQUEST=0;
 		
-		/**node代表一个unfulfilled的生产者*/
+		/**node代表一个unfulfilled的生产者，相当于写入数据*/
 		static final int DATA=1;
 		
-		/**node正在fulfiling另一个unfulfilled的DATA或者REQUEST*/
+		/**node正在fulfiling另一个unfulfilled的DATA或者REQUEST
+		 * 如果对于同一个节点，一个动作是data，接着一个动作是request，那么这两个动作是complementary（互补的），将这两个动作进行match，就是fulfill
+		 * 也就是fulfill说明该节点已经完成的读取和写入，也就是该节点已经完成了匹配
+		 * */
 		static final int FULFILLING=2;
 		
 		/**m值必须大于0或者1才能反回true*/
@@ -333,9 +336,9 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 		
 		static final class QNode{
 			AtomicReference<QNode> next;//队列中下一个QNode
-			AtomicReference<Object>item;//利用CAS获取或者给与数据，获取数据则从null变成not null ，给与数据则从not null 变成null
+			AtomicReference<Object>item;//利用CAS读取或者写入数据，读取数据则从null变成not null ，写入数据则从not null 变成null
 			volatile Thread waiter;// 控制任务的park和unpark
-			boolean isData; //标记是给予数据还是获取数据
+			boolean isData; //标记是写入数据还是读取数据
 			QNode(Object e,boolean isData){
 				this.item=new AtomicReference<Object>(e);
 				this.isData=isData;
@@ -406,7 +409,7 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
          */
         void advanceHead(QNode cmp,QNode val){
         	if(cmp==head.get()&&head.compareAndSet(cmp, val)){
-        		cmp=cmp.next.get();
+        		cmp.next.set(cmp);
         	}
         }
         /**
@@ -435,7 +438,7 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 			for(;;){
 				QNode h=head.get();
 				QNode t=tail.get();
-				if(h==null || t==null)   //如果尚未构造，则重新循环
+				if(h==null || t==null)   //如果尚未初始化，则重新循环
 					continue;
 				if(h==t || t.isData==isData){//如果为true，进入等待者角色，往tail后面挂新QNode
 					QNode tn=t.next.get();//步骤1  获取t的下一个节点，用来判断是否是已经有新的tail了，如果有了就更新tail
@@ -446,7 +449,7 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 					 * 此处之所以需要运行步骤2和步骤3判断，是因为有种可能tail.setNext(new QNode()),此时t==tail但是t.next不为零
 					 * head->waiter->waiter->.......->waiter->tail==t->waiter
 					 */
-					if(tn!=null){//步骤3   如果next不为空，更新tail,
+					if(tn!=null){//步骤3   如果next不为空，更新tail,确保队尾节点是队尾，因为一个节点有了next，那么它肯定不是队尾
 						advanceTail(t,tn);
 						continue;
 					}
@@ -468,25 +471,28 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 					if(!t.casNext(null, s)){//步骤5  如果cas失败，说明有并发的等待者，重新循环
 						continue;
 					}
-					advanceTail(t,s);//步骤6  cas成功，则设置tail=s
+					advanceTail(t,s);//步骤6  cas成功，则设置tail=s，就算cas不成功也没关系，那是因为此时tail.next==s，其他线程会在步骤3已经将其设置为tail
 					Object x=awaitFulfill(s,s.item.get(),timed,nanos);//等待完成匹配
 					if(x==s){//如果为true则说明s已经canceled
 						clean(t,s);
 						return null;//此时添加失败返回null，说明线程中断过
 					}
-					//接下来需要取消s节点
+					//x!=s说明fulfill匹配成功，接着要将该s和匹配node移除队列
 					if(!s.isOffList()){
 						advanceHead(t,s);//如果t位于head，则替换head为s
-						if(x!=null) {
+						if(x!=null) {//如果x！=null，则表示该节点是读取数据，有写入节点进行了匹配
 							/*这一步主要是因为匹配者匹配等待时，需要判断根据等待者的item进行是否cancel进行判断
 							 * 可以看看匹配者匹配前提条件
 							 */
-							 s.item.compareAndSet(e, s);//如果x！=null，则isData=false，则取消该节点
+							 s.item.compareAndSet(e, s);//该节点需要删除
 						}
 						s.waiter=null;// 将线程属性设置为null
 					}
 					return  (x!=null)?x:e;
 				}else{
+					/*
+					 * 当前node和队头的next代表的等待者进行匹配
+					 */
 					QNode hn=h.next.get();
 					if(t!=tail.get()||t.next.get()!=null ||h!=head.get()){//tail和head都已经被cas更新了，读取不是正确的队头队尾，重新开始
 						continue;
@@ -495,16 +501,19 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 						head.compareAndSet(h, hn);
 					}
 				/*匹配前提条件，不通过则重新开始
-				 * (1)isData=true，则等待者hn的item x==null,或者isData=false，则item x！=null 用一条语句写就是(isData!=(x!=null))=true
-				 * (2)等待者hn的item x！=hn
-				 * (3)cas替换item成功 
+				 * (1)当前node写入数据（isData=true），则等待者hn的item x必须为null,或者读取数据（isData=false），则item x必不能等于null ，如果不成立则说明不匹配
+				 * isData==(x!=null)是用来判断匹配者和等待者是否能够匹配，如果不匹配，说明hn已经被匹配过或者已经tryCancel()
+				 * (2)等待者hn的item x！=hn：hn.item=hn说明调用过hn.tryCancel(hn.item)方法，hn需要删除了
+				 * (3)cas替换item成功 ，不成功则说明hn已经被其他的node匹配了
 				 */
 					Object x=hn.item.get();
 					if(isData==(x!=null) || x==hn || !hn.casItem(x, e)){
 						advanceHead(h,hn);//替换head
 						continue;//不满足匹配条件则重新匹配
 					}
-					//匹配通过
+					//匹配通过:isData!=(x!=null)(isData=true,x=null;isData=false,x!=null),x!=hn,hn.casItem(x,e)==true,
+					//这时hn已经将item替换成e，也就是hn在另一个线程awaitful()中循环时，会有hn.getItem()!=e
+					
 					advanceHead(h,hn);//替换head，可能会失败
 					LockSupport.unpark(hn.waiter);
 					return (x!=null)?x:e;
@@ -528,12 +537,12 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 					s.tryCancel(e);//线程中断则取消该等待者节点
 				}
 				Object x=s.item;
-				if(x!=e){
-					return x; //唯一出口
+				if(x!=e){//s.tryCancel(e)方法会使得x!=e,因为s.item=s,另外一个线程request或者data了这个e，那么e!=s.item
+					return x; //唯一退出该方法的地方
 				}
-				if(timed){
+				if(timed){//如果是定时的话，超过时间限度则自动退出
 					long nowTime=System.currentTimeMillis();
-					nanos-=nowTime-lastTime;
+					nanos-=nowTime-lastTime;//还剩下多少时间
 					lastTime=nowTime;
 					if(nanos<=0){
 						s.tryCancel(e);
@@ -558,7 +567,7 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 		 */
 		@SuppressWarnings("unused")
 		void clean(QNode pred,QNode s){
-			s.waiter=null;//遗忘waiter
+			s.waiter=null;//需要删除的节点是不能关联到当前线程的，避免造成内存泄漏
 			while(pred.next.get()==s){//循环前提，pred节点为需要编辑
 				QNode h=head.get();
 				QNode hn=h.next.get();
@@ -577,7 +586,7 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 				}
 				QNode sn=s.next.get();
 				if(s!=t){//如果s不是tail节点，则该节点可以直接删除
-					if(s==sn|| pred.casNext(s, sn)){//s==sn表示已经不再队列上，pre.casNext(s,sn)表示sn接替s成为pred的next，将s删除掉了
+					if(s==sn|| pred.casNext(s, sn)){//s==sn表示已经不在队列上，就无需进行pred.casNext(s,sn)操作，而pre.casNext(s,sn)表示sn接替s成为pred的next，将s删除掉了
 						return;
 					}
 				}
@@ -596,7 +605,7 @@ public class SynchronousQueue<E> extends AbstractQueue<E>
 					if(pred==dp){
 						return ;
 					}
-				}else if(casCleanMe(null,pred)){
+				}else if(casCleanMe(null,pred)){//一开始dp就是null，将pred设置为dp，在下次调用clean方法时进行删除
 					return;//推迟清除s节点
 				}
 			}

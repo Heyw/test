@@ -1,7 +1,9 @@
 package threadpoolproject;
 
+
 import java.util.HashSet;
-import java.util.Queue;
+import java.util.List;
+
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -133,20 +135,20 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
 	 private final static int COUNT_BITS=Integer.SIZE-3;
 	 //capacity表示29位能代表的最大容量，即workCount的最大值，其二进制位为1的二进制位左移29位即1*2^29
 	 //00011111111111111111111111111111=00100000000000000000000000000000-1
-	 private static final int CAPACITY=1<<COUNT_BITS-1;
+	 private static final int CAPACITY=(1<<COUNT_BITS)-1;
 	/**
 	 * 运行状态runstate占据int类型的高3位
 	 */
 	 //运行状态Running为 -1左移29位，即11111111111111111111111111111111左移29位为11100000000000000000000000000000
-	 private static final int  RUNNING=-1<<COUNT_BITS-1;
+	 private static final int  RUNNING=-1<<COUNT_BITS;
 	 //运行状态SHUTDOWN为0左移29位，还是为00000000000000000000000000000000
-	 private static final int SHUTDOWN=0<<COUNT_BITS-1;
+	 private static final int SHUTDOWN=0<<COUNT_BITS;
 	 //运行状态STOP的值为1左移29位，位00100000000000000000000000000000
 	 private static final int STOP=1<<COUNT_BITS;
 	 //运行状态TIDYING的值为2左移29位，位01000000000000000000000000000000
 	 private static final int TIDYING=2<<COUNT_BITS;	
 	 //运行状态TERMINATED的值为3左移29位，位01100000000000000000000000000000
-	 private static final int TERMINATED=1<<COUNT_BITS;
+	 private static final int TERMINATED=3<<COUNT_BITS;
 	 
 	 
 	 /**
@@ -205,6 +207,12 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
 	    */
 	   private static boolean runStateLessThan(int c,int s){
 		   return c<s;
+	   }
+	   
+	   /**ScheduledThreadPool需要的检查运行状态方法，为了能够在shutdown期间启动任务*/
+	   final boolean isRunningOrShutDown(boolean shutDownOk){
+		   int rs=runStateOf(ctl.get());
+		   return rs==RUNNING ||(rs==SHUTDOWN&&shutDownOk);
 	   }
 	   /**如果为false，那么core线程即使闲置，也能存活;
 	    * 如果为true,那么core线程超时等待工作时间为keepAliveTime
@@ -271,10 +279,21 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
         }
 
 		public ThreadPoolExecutor(int corePoolSize, int maxPoolSize, long keepAliveTime, TimeUnit  units,
-				SynchronousQueue<Runnable> synchronousQueue1) {
+				BlockingQueue<Runnable> synchronousQueue1) {
 			this(corePoolSize, maxPoolSize, keepAliveTime, units, synchronousQueue1, Executors.getThreadFactory(), defaultHandler);
 		}
 
+		public ThreadPoolExecutor(int corePoolSize, int maxPoolSize, long KeepAliveTime,
+				TimeUnit unit, BlockingQueue<Runnable> synchronousQueue,
+				ThreadFactory factory) {
+		    this(corePoolSize, maxPoolSize, KeepAliveTime, unit, synchronousQueue, factory, defaultHandler);
+		}
+		
+		public ThreadPoolExecutor(int corePoolSize, int maxPoolSize, long KeepAliveTime,
+				TimeUnit unit, BlockingQueue<Runnable> synchronousQueue,
+				RejectedExecutionHandler handler){
+			 this(corePoolSize, maxPoolSize, KeepAliveTime, unit, synchronousQueue, Executors.getThreadFactory(), handler);
+		}
 		/**
 		 * 在将来某个时间点执行指定的Runnable任务，该任务可能被一个新线程执行也可能被线程池中已存在的线程执行
 		 */
@@ -372,7 +391,7 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
 		   Worker w=null;
 		   try{
 			   final ReentrantLock mainLock=this.mainLock;//获得主锁
-			   w=new Worker(firstTask);//创建一个worker，每个任务都有专门的线程来处理
+			   w=new Worker(firstTask);//创建一个worker
 			   final Thread t=w.thread;//获取w的工作线程
 			   //如果t等于null，则说明ThreadFactory创建失败，也将不会进行add worker操作
 			   if(t!=null){
@@ -484,7 +503,6 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
 			/**
 			 * 将主循环放到外部类的runWorker()中运行，内部类可以访问外部类方法和属性
 			 */
-			@Override
 			public void run() {
 				runWorker(this);
 			}
@@ -553,14 +571,15 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
           * 异常机制的实际效果(net effective)就是尽可能地提供了由使用者代码导致的任何问题的准确信息。
 		 * @param worker
 		 */
-	   final void runWorker(Worker w){
+	   @SuppressWarnings("static-access")
+	final void runWorker(Worker w){
 			Thread wt=Thread.currentThread();
 			Runnable task=w.firstTask;
-			w.firstTask=null;
+			w.firstTask=null;//清空该任务
 			w.unlock();//允许中断
 			boolean completedAbruptly=true;
 			try{
-				 while(task!=null && (task=getTask())!=null){
+				 while(task!=null || (task=getTask())!=null){
 					 w.lock();
 					 //如果线程池处于stopping,那么确认线程已经中断了
 					 //如果线程池不处于stopping，那么确认线程没有中断。这里需要对运行状态进行第二次检查为了处理当清理中断标志时shutDownNow race
@@ -807,5 +826,64 @@ public class ThreadPoolExecutor extends AbstractExecutorService{
 		 * 当线程池终止时调用该方法。该方法默认实现不做任何事。note:为了合理嵌套大量重写，子类实现需要使用该方法来激活super.terminated()方法
 		 */
 		private void terminated(){}
-	
+	    /**
+	     * 
+	     */
+
+		@Override
+		public void shutDown() {
+			// TODO Auto-generated method stub
+			
+		}
+		@Override
+		public List<Runnable> shutDownNow() {
+			// TODO Auto-generated method stub
+			return null;
+		}
+		@Override
+		public boolean isTerminated() {
+			// TODO Auto-generated method stub
+			return false;
+		}
+	    /**
+	     * 请求关闭，发生超时或者线程中断都将导致阻塞，直到所有任务都已经完成。
+	     */
+		public boolean awaitTermination(long timeout, TimeUnit unit)throws InterruptedException {
+			return false;
+			}
+
+		@Override
+		public boolean isShutDown() {
+			// TODO Auto-generated method stub
+			return false;
+		}
+		/**
+		 *返回executor使用的任务队列。获取队列主要是用来调试和监控，移除任务队列不会组织正在执行的任务 
+		 * @return
+		 */
+	  public BlockingQueue<Runnable> getQueue(){
+		return workQueue;
+	}
+	  /**与perstartCoreThread()方法一样，除了在corePoolSize为0的情况下安排至少一个线程启动*/
+	  void ensurePrestart(){
+		  int wc=workCountOf(ctl.get());
+		  if(wc<corePoolSize)
+			  addWorker(null,true);
+		  else if(wc==0)
+			  addWorker(null,false);
+	  }
+	  
+	  /**启动核心线程，使其处于等待工作的空闲状态。仅当执行新任务时，此操作才重写默认的启动核心线程策略。
+	   * 如果已启动所有核心线程，此方法将返回 false。*/
+	  public boolean prestartCoreThread(){
+		  return (workCountOf(ctl.get())<corePoolSize)&&addWorker(null, true);
+	  }
+	  
+	  /**启动所有核心线程，使其处于等待工作的空闲状态。仅当执行新任务时，此操作才重写默认的启动核心线程策略。 */
+	  public int prestartAllCoreThread(){
+		  int n=0;
+		  while(addWorker(null, true))
+			  n++;
+		  return n;
+	  }
 }
