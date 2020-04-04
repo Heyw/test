@@ -9,7 +9,6 @@ import java.util.concurrent.locks.AbstractOwnableSynchronizer;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.LockSupport;
 
-import javax.jws.Oneway;
 
 
 /**
